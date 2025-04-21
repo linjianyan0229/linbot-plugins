@@ -1,7 +1,3 @@
-/**
- * DeepSeek对话插件 - 基于DeepSeek API的智能对话插件
- * 当接收到以"ai"开头的群消息时，调用DeepSeek API进行对话
- */
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
@@ -11,7 +7,7 @@ class DeepSeekPlugin {
         this.client = client;
         this.name = 'DeepSeek对话插件';
         this.description = '基于DeepSeek API的智能对话插件，输入ai+内容来对话';
-        this.apiKey = ''; // 需要设置API密钥
+        this.apiKey = 'sk-'; // 需要设置API密钥
         this.apiUrl = 'https://api.deepseek.com/v1/chat/completions';
         this.model = 'deepseek-chat';
         this.temperature = 0.7;
@@ -27,7 +23,7 @@ class DeepSeekPlugin {
 6. 在群聊中会注意保持适当的社交礼仪`;
         
         // 主人配置
-        this.masters = [""]; // 主人的QQ号列表
+        this.masters = ["2259596781"]; // 主人的QQ号列表
         
         // 黑名单配置
         this.blacklistPath = path.join(__dirname, 'blacklist.json');
@@ -35,6 +31,11 @@ class DeepSeekPlugin {
             users: [],
             groups: []
         };
+        
+        // 上下文配置
+        this.contextDir = path.join(__dirname, 'contexts');
+        this.contextMaxMessages = 10; // 每个用户保存的最大消息数量
+        this.contexts = {}; // 内存中的上下文缓存
         
         console.log(`[${this.name}] 插件已加载`);
     }
@@ -45,7 +46,129 @@ class DeepSeekPlugin {
     async init() {
         // 加载黑名单
         await this.loadBlacklist();
+        
+        // 确保上下文目录存在
+        this.ensureContextDirectory();
+        
         console.log(`[${this.name}] 插件初始化完成`);
+    }
+    
+    /**
+     * 确保上下文目录存在
+     */
+    ensureContextDirectory() {
+        try {
+            if (!fs.existsSync(this.contextDir)) {
+                fs.mkdirSync(this.contextDir, { recursive: true });
+                console.log(`[${this.name}] 创建上下文目录: ${this.contextDir}`);
+            }
+        } catch (error) {
+            console.error(`[${this.name}] 创建上下文目录失败:`, error);
+        }
+    }
+    
+    /**
+     * 获取用户上下文文件路径
+     * @param {string} userId 用户ID
+     * @returns {string} 文件路径
+     */
+    getUserContextPath(userId) {
+        return path.join(this.contextDir, `${userId}.json`);
+    }
+    
+    /**
+     * 加载用户上下文
+     * @param {string} userId 用户ID
+     * @returns {Array} 上下文消息数组
+     */
+    loadUserContext(userId) {
+        // 如果内存中已有缓存，直接返回
+        if (this.contexts[userId]) {
+            return this.contexts[userId];
+        }
+        
+        const contextPath = this.getUserContextPath(userId);
+        try {
+            if (fs.existsSync(contextPath)) {
+                const data = fs.readFileSync(contextPath, 'utf8');
+                this.contexts[userId] = JSON.parse(data);
+                console.log(`[${this.name}] 已加载用户 ${userId} 的上下文，共 ${this.contexts[userId].length} 条消息`);
+            } else {
+                // 创建空上下文
+                this.contexts[userId] = [];
+            }
+        } catch (error) {
+            console.error(`[${this.name}] 加载用户 ${userId} 的上下文失败:`, error);
+            this.contexts[userId] = [];
+        }
+        
+        return this.contexts[userId];
+    }
+    
+    /**
+     * 保存用户上下文
+     * @param {string} userId 用户ID
+     */
+    saveUserContext(userId) {
+        if (!this.contexts[userId]) return;
+        
+        const contextPath = this.getUserContextPath(userId);
+        try {
+            fs.writeFileSync(contextPath, JSON.stringify(this.contexts[userId], null, 2), 'utf8');
+            console.log(`[${this.name}] 已保存用户 ${userId} 的上下文，共 ${this.contexts[userId].length} 条消息`);
+        } catch (error) {
+            console.error(`[${this.name}] 保存用户 ${userId} 的上下文失败:`, error);
+        }
+    }
+    
+    /**
+     * 添加消息到用户上下文
+     * @param {string} userId 用户ID
+     * @param {string} role 角色 (user/assistant)
+     * @param {string} content 消息内容
+     */
+    addMessageToContext(userId, role, content) {
+        // 加载用户上下文
+        const context = this.loadUserContext(userId);
+        
+        // 添加新消息
+        context.push({
+            role,
+            content,
+            timestamp: Date.now()
+        });
+        
+        // 如果超过最大消息数，移除最早的消息
+        if (context.length > this.contextMaxMessages) {
+            context.shift();
+        }
+        
+        // 保存更新后的上下文
+        this.saveUserContext(userId);
+    }
+    
+    /**
+     * 清除用户上下文
+     * @param {string} userId 用户ID
+     * @returns {boolean} 是否成功清除
+     */
+    clearUserContext(userId) {
+        try {
+            // 清除内存中的缓存
+            this.contexts[userId] = [];
+            
+            // 删除文件（如果存在）
+            const contextPath = this.getUserContextPath(userId);
+            if (fs.existsSync(contextPath)) {
+                fs.unlinkSync(contextPath);
+            }
+            
+            console.log(`[${this.name}] 已清除用户 ${userId} 的上下文`);
+            return true;
+        } catch (error) {
+            console.error(`[${this.name}] 清除用户 ${userId} 的上下文失败:`, error);
+            return false;
+        }
     }
     
     /**
@@ -115,7 +238,7 @@ class DeepSeekPlugin {
         const match = cqCode.match(/\[CQ:at,qq=(\d+)\]/);
         return match ? match[1] : null;
     }
-    
+
     /**
      * 处理管理命令
      * @param {string} command 命令
@@ -218,28 +341,57 @@ class DeepSeekPlugin {
             return `黑名单用户: ${this.blacklist.users.join(', ') || '无'}\n黑名单群组: ${this.blacklist.groups.join(', ') || '无'}`;
         }
         
-        return "未知命令，可用命令: ban, unban, bangroup, unbangroup, blacklist";
+        // 处理清除上下文命令
+        if (action === 'clear') {
+            const targetUser = parts[1] || userId;
+            if (this.clearUserContext(targetUser)) {
+                return `已清除用户 ${targetUser} 的对话上下文`;
+            } else {
+                return `清除用户 ${targetUser} 的对话上下文失败`;
+            }
+        }
+        
+        return "未知命令，可用命令: ban, unban, bangroup, unbangroup, blacklist, clear";
     }
 
     /**
      * 调用DeepSeek API
      * @param {string} content 对话内容
+     * @param {string} userId 用户ID
      * @returns {Promise<string>} API返回的回复
      */
-    async callDeepSeekAPI(content) {
+    async callDeepSeekAPI(content, userId) {
         try {
+            // 加载用户上下文
+            const userContext = this.loadUserContext(userId);
+            
+            // 构建消息列表
+            const messages = [
+                {
+                    role: 'system',
+                    content: this.systemPrompt
+                }
+            ];
+            
+            // 添加历史上下文消息
+            userContext.forEach(msg => {
+                messages.push({
+                    role: msg.role,
+                    content: msg.content
+                });
+            });
+            
+            // 添加当前用户消息
+            messages.push({
+                role: 'user',
+                content: content
+            });
+            
+            console.log(`[${this.name}] 发送请求到DeepSeek API，包含 ${messages.length} 条消息`);
+            
             const response = await axios.post(this.apiUrl, {
                 model: this.model,
-                messages: [
-                    {
-                        role: 'system',
-                        content: this.systemPrompt
-                    },
-                    {
-                        role: 'user',
-                        content: content
-                    }
-                ],
+                messages: messages,
                 temperature: this.temperature,
                 max_tokens: this.maxTokens
             }, {
@@ -249,7 +401,13 @@ class DeepSeekPlugin {
                 }
             });
 
-            return response.data.choices[0].message.content;
+            const reply = response.data.choices[0].message.content;
+            
+            // 将用户消息和AI回复添加到上下文
+            this.addMessageToContext(userId, 'user', content);
+            this.addMessageToContext(userId, 'assistant', reply);
+            
+            return reply;
         } catch (error) {
             console.error(`[${this.name}] 调用DeepSeek API失败:`, error);
             return '抱歉，AI服务暂时不可用，请稍后再试。';
@@ -287,6 +445,22 @@ class DeepSeekPlugin {
                 
                 return true;
             }
+            
+            // 处理清除上下文命令
+            if (typeof content === 'string' && content.toLowerCase() === 'ai clear') {
+                if (this.clearUserContext(userId)) {
+                    await this.client.callApi('send_group_msg', {
+                        group_id: groupId,
+                        message: `[CQ:at,qq=${userId}] 已清除你的对话上下文`
+                    });
+                } else {
+                    await this.client.callApi('send_group_msg', {
+                        group_id: groupId,
+                        message: `[CQ:at,qq=${userId}] 清除对话上下文失败，请稍后再试`
+                    });
+                }
+                return true;
+            }
 
             // 检查消息是否以"ai"开头(不区分大小写)
             if (typeof content === 'string' && content.toLowerCase().startsWith('ai')) {
@@ -314,8 +488,8 @@ class DeepSeekPlugin {
                 // 组装回复
                 let reply = '';
                 if (query) {
-                    // 调用DeepSeek API
-                    reply = await this.callDeepSeekAPI(query);
+                    // 调用DeepSeek API (传入用户ID以便使用上下文)
+                    reply = await this.callDeepSeekAPI(query, userId);
                 } else {
                     reply = '请在ai后面输入要对话的内容';
                 }
