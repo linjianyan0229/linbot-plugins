@@ -1,397 +1,405 @@
-/**
- * DeepSeek对话插件 - 基于DeepSeek API的智能对话插件
- * 当接收到以"ai"开头的群消息时，调用DeepSeek API进行对话
- */
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
-const cheerio = require('cheerio'); // 新增依赖
+const cheerio = require('cheerio');
 
 class DeepSeekPlugin {
     constructor(client) {
         this.client = client;
         this.name = 'DeepSeek对话插件mod';
-        this.description = '基于DeepSeek API的智能对话插件，输入ai+内容来对话';
-        this.apiKey = 'sk-'; // 需要设置API密钥
-        this.apiUrl = 'https://api.deepseek.com/v1/chat/completions';
+        this.description = '基于DeepSeek API的智能对话插件，输入mod+内容来对话';
+        this.apiKey = 'sk-';
+        this.apiUrl = 'https://api.deepseek.com/v1';
         this.model = 'deepseek-chat';
         this.temperature = 0.7;
         this.maxTokens = 2000;
         
-        // 新增搜索配置
-        this.searchUrl = 'https://www.mcmod.cn/s';
-        this.searchHeaders = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3'
-        };
-
-        this.systemPrompt = `请你接入https://www.mcmod.cn之后回答我的问题，所返回的回答内不能包含链接，尽可能的详细回答我，不能引用非https://www.mcmod.cn以外的信息，并且不能回答代码，有些MOD会有多种配方需要全部列出，但是多种配方要在这个MOD之中，以外的配方无需考虑，限制500字以内`;
+        // 上下文存储
+        this.contexts = new Map();
+        this.maxContext = 5;
         
-        this.masters = [""]; // 主人QQ号
+        // AI身份设置
+        this.systemPrompt = `你是一个专业的Minecraft MOD知识助手，请根据提供的资料和对话上下文整合出一个简明扼要的回答，回答必须基于提供的资料，限制在200字以内。不要包含任何链接或网址。`;
         
+        // 权限配置
+        this.owner = "3806357586";
+        this.masters = ["1706877531","2716966189","1708539615","3100942973","1590956414","2059253374","2109186461","2637150798","3135747027","624326154","2323563421","3204618757","2907331904"];
+        
+        // 文件路径配置
         this.blacklistPath = path.join(__dirname, 'blacklist.json');
-        this.blacklist = {
-            users: [],
-            groups: []
+        this.modAliasesPath = path.join(__dirname, 'mod_aliases.json');
+        this.recipesPath = path.join(__dirname, 'recipes.json');
+        this.cachePath = path.join(__dirname, 'mod_cache.json');
+        
+        // 默认数据
+        this.blacklist = { users: [], groups: [] };
+        this.modAliases = {
+            "ae2": "应用能源二", "jei": "JEI物品管理器", "rei": "REI物品管理器",
+            "ic2": "工业时代2", "te": "热力膨胀", "mek": "通用机械",
+            "bot": "植物魔法", "thaum": "神秘时代", "tcon": "匠魂", "ae": "应用能源"
         };
-        
-        // 上下文配置
-        this.contextDir = path.join(__dirname, 'contexts');
-        this.contextMaxMessages = 10; // 每个用户保存的最大消息数量
-        this.contexts = {}; // 内存中的上下文缓存
-        
+        this.recipes = {};
+        this.cache = {};
+        this.cacheExpiry = 24 * 60 * 60 * 1000;
+
         console.log(`[${this.name}] 插件已加载`);
     }
 
-    /**
-     * 插件初始化方法
-     */
     async init() {
-        // 加载黑名单
-        await this.loadBlacklist();
-        
-        // 确保上下文目录存在
-        this.ensureContextDirectory();
-        
+        await this.loadData();
         console.log(`[${this.name}] 插件初始化完成`);
     }
     
-    /**
-     * 加载黑名单
-     */
-    async loadBlacklist() {
+    async loadData() {
         try {
+            // 加载黑名单
             if (fs.existsSync(this.blacklistPath)) {
-                const data = fs.readFileSync(this.blacklistPath, 'utf8');
-                this.blacklist = JSON.parse(data);
-                console.log(`[${this.name}] 黑名单加载成功，包含 ${this.blacklist.users.length} 个用户和 ${this.blacklist.groups.length} 个群组`);
+                this.blacklist = JSON.parse(fs.readFileSync(this.blacklistPath, 'utf8'));
             } else {
-                // 创建默认黑名单文件
-                await this.saveBlacklist();
-                console.log(`[${this.name}] 黑名单文件不存在，已创建默认文件`);
+                await this.saveData('blacklist');
+            }
+            
+            // 加载MOD别名
+            if (fs.existsSync(this.modAliasesPath)) {
+                this.modAliases = JSON.parse(fs.readFileSync(this.modAliasesPath, 'utf8'));
+            } else {
+                await this.saveData('modAliases');
+            }
+            
+            // 加载配方
+            if (fs.existsSync(this.recipesPath)) {
+                this.recipes = JSON.parse(fs.readFileSync(this.recipesPath, 'utf8'));
+            } else {
+                await this.saveData('recipes');
+            }
+            
+            // 加载缓存
+            if (fs.existsSync(this.cachePath)) {
+                this.cache = JSON.parse(fs.readFileSync(this.cachePath, 'utf8'));
+                this.cleanExpiredCache();
+            } else {
+                await this.saveData('cache');
             }
         } catch (error) {
-            console.error(`[${this.name}] 加载黑名单失败:`, error);
+            console.error(`[${this.name}] 加载数据失败:`, error);
         }
     }
     
-    /**
-     * 保存黑名单
-     */
-    async saveBlacklist() {
+    async saveData(type) {
         try {
-            fs.writeFileSync(this.blacklistPath, JSON.stringify(this.blacklist, null, 2), 'utf8');
-            console.log(`[${this.name}] 黑名单保存成功`);
+            const pathMap = {
+                blacklist: this.blacklistPath,
+                modAliases: this.modAliasesPath,
+                recipes: this.recipesPath,
+                cache: this.cachePath
+            };
+            const dataMap = {
+                blacklist: this.blacklist,
+                modAliases: this.modAliases,
+                recipes: this.recipes,
+                cache: this.cache
+            };
+            
+            fs.writeFileSync(pathMap[type], JSON.stringify(dataMap[type], null, 2), 'utf8');
+            console.log(`[${this.name}] ${type}保存成功`);
         } catch (error) {
-            console.error(`[${this.name}] 保存黑名单失败:`, error);
+            console.error(`[${this.name}] 保存${type}失败:`, error);
         }
     }
     
-    /**
-     * 检查用户是否在黑名单中
-     * @param {string} userId 用户ID
-     * @returns {boolean} 是否在黑名单中
-     */
-    isUserBlacklisted(userId) {
-        return this.blacklist.users.includes(userId.toString());
+    cleanExpiredCache() {
+        const now = Date.now();
+        let expiredCount = 0;
+        for (const key in this.cache) {
+            if (now - this.cache[key].timestamp > this.cacheExpiry) {
+                delete this.cache[key];
+                expiredCount++;
+            }
+        }
+        if (expiredCount > 0) {
+            console.log(`[${this.name}] 清理了 ${expiredCount} 个过期缓存项`);
+            this.saveData('cache');
+        }
     }
     
-    /**
-     * 检查群组是否在黑名单中
-     * @param {string} groupId 群组ID
-     * @returns {boolean} 是否在黑名单中
-     */
-    isGroupBlacklisted(groupId) {
-        return this.blacklist.groups.includes(groupId.toString());
-    }
+    // 权限检查方法
+    isUserBlacklisted(userId) { return this.blacklist.users.includes(userId.toString()); }
+    isGroupBlacklisted(groupId) { return this.blacklist.groups.includes(groupId.toString()); }
+    isOwner(userId) { return userId.toString() === this.owner; }
+    isMaster(userId) { return this.isOwner(userId) || this.masters.includes(userId.toString()); }
     
-    /**
-     * 检查用户是否是主人
-     * @param {string} userId 用户ID
-     * @returns {boolean} 是否是主人
-     */
-    isMaster(userId) {
-        return this.masters.includes(userId.toString());
-    }
-    
-    /**
-     * 从CQ码中提取用户ID
-     * @param {string} cqCode CQ码
-     * @returns {string|null} 用户ID或null
-     */
     extractUserIdFromCQCode(cqCode) {
         const match = cqCode.match(/\[CQ:at,qq=(\d+)\]/);
         return match ? match[1] : null;
     }
     
-    /**
-     * 确保上下文目录存在
-     */
-    ensureContextDirectory() {
-        try {
-            if (!fs.existsSync(this.contextDir)) {
-                fs.mkdirSync(this.contextDir, { recursive: true });
-                console.log(`[${this.name}] 创建上下文目录: ${this.contextDir}`);
-            }
-        } catch (error) {
-            console.error(`[${this.name}] 创建上下文目录失败:`, error);
-        }
-    }
-    
-    /**
-     * 获取用户上下文文件路径
-     * @param {string} userId 用户ID
-     * @returns {string} 文件路径
-     */
-    getUserContextPath(userId) {
-        return path.join(this.contextDir, `${userId}.json`);
-    }
-    
-    /**
-     * 加载用户上下文
-     * @param {string} userId 用户ID
-     * @returns {Array} 上下文消息数组
-     */
-    loadUserContext(userId) {
-        // 如果内存中已有缓存，直接返回
-        if (this.contexts[userId]) {
-            return this.contexts[userId];
-        }
-        
-        const contextPath = this.getUserContextPath(userId);
-        try {
-            if (fs.existsSync(contextPath)) {
-                const data = fs.readFileSync(contextPath, 'utf8');
-                this.contexts[userId] = JSON.parse(data);
-                console.log(`[${this.name}] 已加载用户 ${userId} 的上下文，共 ${this.contexts[userId].length} 条消息`);
-            } else {
-                // 创建空上下文
-                this.contexts[userId] = [];
-            }
-        } catch (error) {
-            console.error(`[${this.name}] 加载用户 ${userId} 的上下文失败:`, error);
-            this.contexts[userId] = [];
-        }
-        
-        return this.contexts[userId];
-    }
-    
-    /**
-     * 保存用户上下文
-     * @param {string} userId 用户ID
-     */
-    saveUserContext(userId) {
-        if (!this.contexts[userId]) return;
-        
-        const contextPath = this.getUserContextPath(userId);
-        try {
-            fs.writeFileSync(contextPath, JSON.stringify(this.contexts[userId], null, 2), 'utf8');
-            console.log(`[${this.name}] 已保存用户 ${userId} 的上下文，共 ${this.contexts[userId].length} 条消息`);
-        } catch (error) {
-            console.error(`[${this.name}] 保存用户 ${userId} 的上下文失败:`, error);
-        }
-    }
-    
-    /**
-     * 添加消息到用户上下文
-     * @param {string} userId 用户ID
-     * @param {string} role 角色 (user/assistant)
-     * @param {string} content 消息内容
-     */
-    addMessageToContext(userId, role, content) {
-        // 加载用户上下文
-        const context = this.loadUserContext(userId);
-        
-        // 添加新消息
-        context.push({
-            role,
-            content,
-            timestamp: Date.now()
-        });
-        
-        // 如果超过最大消息数，移除最早的消息
-        if (context.length > this.contextMaxMessages) {
-            context.shift();
-        }
-        
-        // 保存更新后的上下文
-        this.saveUserContext(userId);
-    }
-    
-    /**
-     * 清除用户上下文
-     * @param {string} userId 用户ID
-     * @returns {boolean} 是否成功清除
-     */
-    clearUserContext(userId) {
-        try {
-            // 清除内存中的缓存
-            this.contexts[userId] = [];
-            
-            // 删除文件（如果存在）
-            const contextPath = this.getUserContextPath(userId);
-            if (fs.existsSync(contextPath)) {
-                fs.unlinkSync(contextPath);
-            }
-            
-            console.log(`[${this.name}] 已清除用户 ${userId} 的上下文`);
-            return true;
-        } catch (error) {
-            console.error(`[${this.name}] 清除用户 ${userId} 的上下文失败:`, error);
-            return false;
-        }
-    }
-
-    /**
-     * 处理管理命令
-     * @param {string} command 命令
-     * @param {string} userId 用户ID
-     * @param {string} groupId 群组ID
-     * @returns {Promise<string>} 处理结果
-     */
+    // 命令处理
     async handleAdminCommand(command, userId, groupId) {
-        // 只有主人可以执行管理命令
-        if (!this.isMaster(userId)) {
-            return "你不是我的主人，无权执行此命令~";
-        }
+        if (!this.isMaster(userId)) return "你不是管理员或拥有者，无权执行此命令~";
         
         const parts = command.split(' ');
         const action = parts[0].toLowerCase();
         
-        // 处理ban命令
-        if (action === 'ban') {
-            const target = parts.slice(1).join(' ').trim();
+        // 帮助命令
+        if (action === 'help') return this.getHelpMessage(userId);
+        
+        // 黑名单管理
+        if (action === 'ban') return await this.handleBan(parts.slice(1).join(' ').trim());
+        if (action === 'unban') return await this.handleUnban(parts.slice(1).join(' ').trim());
+        if (action === 'bangroup' && parts.length > 1) return await this.handleBanGroup(parts[1].trim());
+        if (action === 'unbangroup' && parts.length > 1) return await this.handleUnbanGroup(parts[1].trim());
+        if (action === 'blacklist') return `黑名单用户: ${this.blacklist.users.join(', ') || '无'}\n黑名单群组: ${this.blacklist.groups.join(', ') || '无'}`;
+        
+        // 管理员管理（仅拥有者）
+        if (action === 'addmaster' && this.isOwner(userId) && parts.length > 1) return this.handleAddMaster(parts[1].trim());
+        if (action === 'removemaster' && this.isOwner(userId) && parts.length > 1) return this.handleRemoveMaster(parts[1].trim());
+        if (action === 'listmasters') return `当前管理员列表: ${this.masters.join(', ')}`;
+        
+        // MOD别名管理
+        if (action === 'addalias' && parts.length > 2) return await this.handleAddAlias(parts[1].toLowerCase(), parts.slice(2).join(' '));
+        if (action === 'removealias' && parts.length > 1) return await this.handleRemoveAlias(parts[1].toLowerCase());
+        if (action === 'listaliases') return this.getAliasesList();
+        
+        // 配方管理
+        if (action === 'addrecipe' && parts.length > 2) return await this.handleAddRecipe(parts[1], parts.slice(2).join(' '));
+        if (action === 'removerecipe' && parts.length > 1) return await this.handleRemoveRecipe(parts[1]);
+        if (action === 'listrecipes') return this.getRecipesList();
+        
+        // 缓存管理
+        if (action === 'clearcache') return await this.handleClearCache();
+        
+        return "未知命令，请输入 modadmin help 查看可用命令";
+    }
+    
+    // 黑名单处理方法
+    async handleBan(target) {
+        const targetId = this.extractUserIdFromCQCode(target) || target;
+        if (!targetId) return "请指定要ban的用户，可以通过艾特或输入QQ号";
+        if (this.blacklist.users.includes(targetId)) return `用户 ${targetId} 已经在黑名单中了`;
+        this.blacklist.users.push(targetId);
+        await this.saveData('blacklist');
+        return `已将用户 ${targetId} 添加到黑名单`;
+    }
+    
+    async handleUnban(target) {
+        const targetId = this.extractUserIdFromCQCode(target) || target;
+        if (!targetId) return "请指定要解ban的用户，可以通过艾特或输入QQ号";
+        const index = this.blacklist.users.indexOf(targetId);
+        if (index === -1) return `用户 ${targetId} 不在黑名单中`;
+        this.blacklist.users.splice(index, 1);
+        await this.saveData('blacklist');
+        return `已将用户 ${targetId} 从黑名单中移除`;
+    }
+    
+    async handleBanGroup(targetId) {
+        if (this.blacklist.groups.includes(targetId)) return `群组 ${targetId} 已经在黑名单中了`;
+        this.blacklist.groups.push(targetId);
+        await this.saveData('blacklist');
+        return `已将群组 ${targetId} 添加到黑名单`;
+    }
+    
+    async handleUnbanGroup(targetId) {
+        const index = this.blacklist.groups.indexOf(targetId);
+        if (index === -1) return `群组 ${targetId} 不在黑名单中`;
+        this.blacklist.groups.splice(index, 1);
+        await this.saveData('blacklist');
+        return `已将群组 ${targetId} 从黑名单中移除`;
+    }
+    
+    // 管理员管理方法
+    handleAddMaster(targetId) {
+        if (this.masters.includes(targetId)) return `用户 ${targetId} 已经是管理员了`;
+        this.masters.push(targetId);
+        return `已将用户 ${targetId} 添加为管理员`;
+    }
+    
+    handleRemoveMaster(targetId) {
+        const index = this.masters.indexOf(targetId);
+        if (index === -1) return `用户 ${targetId} 不是管理员`;
+        this.masters.splice(index, 1);
+        return `已将用户 ${targetId} 从管理员中移除`;
+    }
+    
+    // MOD别名方法
+    async handleAddAlias(alias, modName) {
+        if (this.modAliases[alias]) return `别名 ${alias} 已经存在，对应MOD: ${this.modAliases[alias]}`;
+        this.modAliases[alias] = modName;
+        await this.saveData('modAliases');
+        return `已添加别名 ${alias} 对应MOD: ${modName}`;
+    }
+    
+    async handleRemoveAlias(alias) {
+        if (!this.modAliases[alias]) return `别名 ${alias} 不存在`;
+        delete this.modAliases[alias];
+        await this.saveData('modAliases');
+        return `已移除别名 ${alias}`;
+    }
+    
+    getAliasesList() {
+        const aliases = Object.entries(this.modAliases).map(([alias, name]) => `${alias} -> ${name}`).join('\n');
+        return `当前MOD别名列表:\n${aliases || '无'}`;
+    }
+    
+    // 配方方法
+    async handleAddRecipe(itemName, recipe) {
+        this.recipes[itemName] = recipe;
+        await this.saveData('recipes');
+        return `已添加 ${itemName} 的特殊配方: ${recipe}`;
+    }
+    
+    async handleRemoveRecipe(itemName) {
+        if (!this.recipes[itemName]) return `物品 ${itemName} 没有特殊配方`;
+        delete this.recipes[itemName];
+        await this.saveData('recipes');
+        return `已移除 ${itemName} 的特殊配方`;
+    }
+    
+    getRecipesList() {
+        const recipes = Object.entries(this.recipes).map(([item, recipe]) => `${item}: ${recipe}`).join('\n');
+        return `当前特殊配方列表:\n${recipes || '无'}`;
+    }
+    
+    // 缓存方法
+    async handleClearCache() {
+        this.cache = {};
+        await this.saveData('cache');
+        return `已清除所有缓存`;
+    }
+    
+    // 帮助信息
+    getHelpMessage(userId) {
+        let helpMsg = "=== MOD插件帮助 ===\n普通用户命令:\n";
+        helpMsg += "mod <内容> - 查询MOD相关信息\nmods <内容> - 在mcmod.cn搜索MOD信息\nmod help - 显示此帮助信息\n";
+        
+        if (this.isMaster(userId)) {
+            helpMsg += "\n管理员命令:\n";
+            helpMsg += "modadmin ban <用户> - 将用户加入黑名单\n";
+            helpMsg += "modadmin unban <用户> - 将用户移出黑名单\n";
+            helpMsg += "modadmin bangroup <群号> - 将群组加入黑名单\n";
+            helpMsg += "modadmin unbangroup <群号> - 将群组移出黑名单\n";
+            helpMsg += "modadmin blacklist - 查看黑名单\n";
+            helpMsg += "modadmin addalias <别名> <MOD名> - 添加MOD别名\n";
+            helpMsg += "modadmin removealias <别名> - 移除MOD别名\n";
+            helpMsg += "modadmin listaliases - 列出所有MOD别名\n";
+            helpMsg += "modadmin addrecipe <物品名> <配方> - 添加特殊配方\n";
+            helpMsg += "modadmin removerecipe <物品名> - 移除特殊配方\n";
+            helpMsg += "modadmin listrecipes - 列出所有特殊配方\n";
+            helpMsg += "modadmin clearcache - 清除缓存\n";
             
-            // 尝试从CQ码中提取用户ID
-            let targetId = this.extractUserIdFromCQCode(target);
-            if (!targetId) {
-                // 如果不是CQ码，则直接使用输入的内容
-                targetId = target;
+            if (this.isOwner(userId)) {
+                helpMsg += "\n拥有者命令:\n";
+                helpMsg += "modadmin addmaster <用户> - 添加管理员\n";
+                helpMsg += "modadmin removemaster <用户> - 移除管理员\n";
+                helpMsg += "modadmin listmasters - 列出所有管理员\n";
             }
-            
-            if (!targetId) {
-                return "请指定要ban的用户，可以通过艾特或输入QQ号";
-            }
-            
-            // 如果目标ID已经在黑名单中
-            if (this.blacklist.users.includes(targetId)) {
-                return `用户 ${targetId} 已经在黑名单中了`;
-            }
-            
-            // 添加到黑名单
-            this.blacklist.users.push(targetId);
-            await this.saveBlacklist();
-            return `已将用户 ${targetId} 添加到黑名单`;
         }
         
-        // 处理unban命令
-        if (action === 'unban') {
-            const target = parts.slice(1).join(' ').trim();
-            
-            // 尝试从CQ码中提取用户ID
-            let targetId = this.extractUserIdFromCQCode(target);
-            if (!targetId) {
-                // 如果不是CQ码，则直接使用输入的内容
-                targetId = target;
-            }
-            
-            if (!targetId) {
-                return "请指定要解ban的用户，可以通过艾特或输入QQ号";
-            }
-            
-            // 如果目标ID不在黑名单中
-            const index = this.blacklist.users.indexOf(targetId);
-            if (index === -1) {
-                return `用户 ${targetId} 不在黑名单中`;
-            }
-            
-            // 从黑名单移除
-            this.blacklist.users.splice(index, 1);
-            await this.saveBlacklist();
-            return `已将用户 ${targetId} 从黑名单中移除`;
-        }
-        
-        if (action === 'bangroup' && parts.length > 1) {
-            const targetId = parts[1].trim();
-            
-            // 如果目标群组已经在黑名单中
-            if (this.blacklist.groups.includes(targetId)) {
-                return `群组 ${targetId} 已经在黑名单中了`;
-            }
-            
-            // 添加到黑名单
-            this.blacklist.groups.push(targetId);
-            await this.saveBlacklist();
-            return `已将群组 ${targetId} 添加到黑名单`;
-        }
-        
-        if (action === 'unbangroup' && parts.length > 1) {
-            const targetId = parts[1].trim();
-            
-            // 如果目标群组不在黑名单中
-            const index = this.blacklist.groups.indexOf(targetId);
-            if (index === -1) {
-                return `群组 ${targetId} 不在黑名单中`;
-            }
-            
-            // 从黑名单移除
-            this.blacklist.groups.splice(index, 1);
-            await this.saveBlacklist();
-            return `已将群组 ${targetId} 从黑名单中移除`;
-        }
-        
-        if (action === 'blacklist') {
-            return `黑名单用户: ${this.blacklist.users.join(', ') || '无'}\n黑名单群组: ${this.blacklist.groups.join(', ') || '无'}`;
-        }
-        
-        // 处理清除上下文命令
-        if (action === 'clear') {
-            const targetUser = parts[1] || userId;
-            if (this.clearUserContext(targetUser)) {
-                return `已清除用户 ${targetUser} 的对话上下文`;
-            } else {
-                return `清除用户 ${targetUser} 的对话上下文失败`;
-            }
-        }
-        
-        return "未知命令，可用命令: ban, unban, bangroup, unbangroup, blacklist, clear";
+        return helpMsg;
     }
 
-    /**
-     * 调用DeepSeek API
-     * @param {string} content 对话内容
-     * @param {string} userId 用户ID
-     * @returns {Promise<string>} API返回的回复
-     */
-    async callDeepSeekAPI(content, userId) {
+    // 信息处理核心方法
+    extractKeywords(text) {
+        const chineseWords = text.match(/[\u4e00-\u9fa5]+/g) || [];
+        const englishWords = text.match(/\b[a-zA-Z]+\b/g) || [];
+        return [...chineseWords, ...englishWords].filter(word => word.length > 1);
+    }
+
+    async searchMcMod(keyword) {
+        const cacheKey = `search_${keyword.toLowerCase()}`;
+        if (this.cache[cacheKey] && Date.now() - this.cache[cacheKey].timestamp < this.cacheExpiry) {
+            return this.cache[cacheKey].data;
+        }
+        
         try {
-            // 加载用户上下文
-            const userContext = this.loadUserContext(userId);
-            
-            // 构建消息列表
-            const messages = [
-                {
-                    role: 'system',
-                    content: this.systemPrompt
-                }
-            ];
-            
-            // 添加历史上下文消息
-            userContext.forEach(msg => {
-                messages.push({
-                    role: msg.role,
-                    content: msg.content
-                });
+            const searchUrl = `https://search.mcmod.cn/s?key=${encodeURIComponent(keyword)}`;
+            const response = await axios.get(searchUrl, {
+                headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36' }
             });
             
-            // 添加当前用户消息
-            messages.push({
-                role: 'user',
-                content: content
+            this.cache[cacheKey] = { data: response.data, timestamp: Date.now() };
+            await this.saveData('cache');
+            
+            return response.data;
+        } catch (error) {
+            console.error(`[${this.name}] 搜索mcmod.cn失败:`, error);
+            return null;
+        }
+    }
+
+    extractMostRelevantResult(html) {
+        try {
+            const $ = cheerio.load(html);
+            const firstResult = $('.result-item').first();
+            if (firstResult.length) {
+                return {
+                    url: `https://www.mcmod.cn${firstResult.find('a').attr('href')}`,
+                    title: firstResult.find('.head').text().trim(),
+                    description: firstResult.find('.body').text().trim().replace(/\s+/g, ' ')
+                };
+            }
+            return null;
+        } catch (error) {
+            console.error(`[${this.name}] 解析搜索结果失败:`, error);
+            return null;
+        }
+    }
+
+    async scrapePageContent(url) {
+        const cacheKey = `page_${encodeURIComponent(url)}`;
+        if (this.cache[cacheKey] && Date.now() - this.cache[cacheKey].timestamp < this.cacheExpiry) {
+            return this.cache[cacheKey].data;
+        }
+        
+        try {
+            const response = await axios.get(url, {
+                headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36' }
             });
             
-            console.log(`[${this.name}] 发送请求到DeepSeek API，包含 ${messages.length} 条消息`);
+            const $ = cheerio.load(response.data);
+            const mainContent = $('.content-main, article, .wiki-detail, .mod-detail');
+            let content = mainContent.length ? mainContent.text() : $('body').text();
+            content = content.replace(/\s+/g, ' ').trim().substring(0, 5000);
             
-            const response = await axios.post(this.apiUrl, {
+            this.cache[cacheKey] = { data: content, timestamp: Date.now() };
+            await this.saveData('cache');
+            
+            return content;
+        } catch (error) {
+            console.error(`[${this.name}] 爬取页面内容失败:`, error);
+            return null;
+        }
+    }
+
+    async searchAndScrape(query) {
+        // 检查特殊配方
+        if (this.recipes[query]) return `特殊配方信息: ${this.recipes[query]}`;
+        
+        // 检查MOD别名
+        const lowerQuery = query.toLowerCase();
+        if (this.modAliases[lowerQuery]) query = this.modAliases[lowerQuery];
+        
+        const keywords = this.extractKeywords(query);
+        let referenceContent = '';
+        
+        for (const keyword of keywords.slice(0, 3)) {
+            const searchHtml = await this.searchMcMod(keyword);
+            if (!searchHtml) continue;
+            
+            const result = this.extractMostRelevantResult(searchHtml);
+            if (!result) continue;
+            
+            const content = await this.scrapePageContent(result.url);
+            if (content) {
+                referenceContent += `关键词 "${keyword}" 的搜索结果:\n标题: ${result.title}\n简介: ${result.description}\n内容: ${content}\n\n`;
+            }
+        }
+        
+        return referenceContent || '无相关资料';
+    }
+
+    async callDeepSeekAPI(messages) {
+        try {
+            const response = await axios.post(`${this.apiUrl}/chat/completions`, {
                 model: this.model,
                 messages: messages,
                 temperature: this.temperature,
@@ -402,97 +410,10 @@ class DeepSeekPlugin {
                     'Content-Type': 'application/json'
                 }
             });
-
-            const reply = response.data.choices[0].message.content;
-            
-            // 将用户消息和AI回复添加到上下文
-            this.addMessageToContext(userId, 'user', content);
-            this.addMessageToContext(userId, 'assistant', reply);
-            
-            return reply;
+            return response.data.choices[0].message.content;
         } catch (error) {
             console.error(`[${this.name}] 调用DeepSeek API失败:`, error);
             return '抱歉，AI服务暂时不可用，请稍后再试。';
-        }
-    }
-
-    // 新增搜索方法
-    async searchMcmod(query) {
-        try {
-            console.log(`[${this.name}] 开始搜索: ${query}`);
-            const response = await axios.get(this.searchUrl, {
-                params: { key: query },
-                headers: this.searchHeaders
-            });
-
-            const $ = cheerio.load(response.data);
-            console.log(`[${this.name}] 网页加载成功，状态码: ${response.status}`);
-            
-            const results = [];
-
-            // 获取所有链接到模组页面的链接
-            const modLinks = $('body a[href^="https://www.mcmod.cn/class/"]');
-            console.log(`[${this.name}] 找到 ${modLinks.length} 个模组链接`);
-            
-            // 为防止重复，跟踪已处理过的URL
-            const processedUrls = new Set();
-            
-            modLinks.each((i, el) => {
-                const href = $(el).attr('href');
-                const title = $(el).text().trim();
-                
-                // 跳过已处理的链接、空文本链接或链接文本为URL的情况
-                if (processedUrls.has(href) || !title || title.startsWith('www.mcmod.cn')) {
-                    return;
-                }
-                
-                // 标记此URL为已处理
-                processedUrls.add(href);
-                
-                // 从链接文本中提取模组类型和名称
-                let type = '模组';
-                let name = title;
-                
-                const typeMatch = title.match(/^\[(.*?)\]/);
-                if (typeMatch && typeMatch[1]) {
-                    type = typeMatch[1];
-                    name = title;
-                }
-                
-                // 尝试获取描述文本
-                let desc = '';
-                // 查找相邻段落或同一块内的文本作为描述
-                const parentEl = $(el).parent().parent();
-                if (parentEl.length > 0) {
-                    const fullText = parentEl.text();
-                    // 从完整文本中移除链接文本，剩下的可能是描述
-                    desc = fullText.replace(title, '').replace(/\s+/g, ' ').trim();
-                    
-                    // 如果描述太长，只取前100个字符
-                    if (desc.length > 100) {
-                        desc = desc.substring(0, 100) + '...';
-                    }
-                }
-                
-                // 将结果添加到列表中
-                results.push(`【${type}】${name}\n${desc}`);
-                
-                // 只取前5个不同的结果
-                if (results.length >= 5) {
-                    return false; // 终止each循环
-                }
-            });
-            
-            console.log(`[${this.name}] 解析完成，找到 ${results.length} 个有效结果`);
-            
-            if (results.length > 0) {
-                return `找到以下相关内容：\n\n${results.join('\n\n')}`;
-            } else {
-                return `未能在MC百科找到"${query}"相关模组信息，建议换个关键词再试`;
-            }
-        } catch (error) {
-            console.error(`[${this.name}] 搜索失败:`, error);
-            return '搜索服务暂时不可用，请稍后再试';
         }
     }
 
@@ -504,79 +425,90 @@ class DeepSeekPlugin {
             const groupId = message.group_id.toString();
             const userId = message.user_id.toString();
 
-            // 处理管理命令
+            console.log(`[${this.name}] 收到消息: ${content}`);
+            
+            // 处理管理员命令
             if (typeof content === 'string' && content.toLowerCase().startsWith('modadmin')) {
-                const adminCommand = content.substring(8).trim();
-                const reply = await this.handleAdminCommand(adminCommand, userId, groupId);
+                const reply = await this.handleAdminCommand(content.substring(8).trim(), userId, groupId);
                 await this.client.callApi('send_group_msg', { group_id: groupId, message: reply });
                 return true;
             }
             
-            // 处理清除上下文命令
-            if (typeof content === 'string' && content.toLowerCase() === 'modclear') {
-                if (this.clearUserContext(userId)) {
-                    await this.client.callApi('send_group_msg', {
-                        group_id: groupId,
-                        message: `[CQ:at,qq=${userId}] 已清除你的对话上下文`
-                    });
-                } else {
-                    await this.client.callApi('send_group_msg', {
-                        group_id: groupId,
-                        message: `[CQ:at,qq=${userId}] 清除对话上下文失败，请稍后再试`
-                    });
-                }
+            // 处理帮助命令
+            if (typeof content === 'string' && content.toLowerCase() === 'mod help') {
+                await this.client.callApi('send_group_msg', { 
+                    group_id: groupId, 
+                    message: this.getHelpMessage(userId) 
+                });
                 return true;
             }
-
-            // 新增搜索指令处理
-            if (content.toLowerCase().startsWith('mods')) {
-                if (this.isGroupBlacklisted(groupId)) {
-                    console.log(`[${this.name}] 群组 ${groupId} 在黑名单中，忽略搜索请求`);
+            
+            // 处理MOD查询命令
+            if (typeof content === 'string' && (content.toLowerCase().startsWith('mod ') || content.toLowerCase().startsWith('mods '))) {
+                if (this.isGroupBlacklisted(groupId) || this.isUserBlacklisted(userId)) {
+                    console.log(`[${this.name}] 群组或用户被黑名单阻止`);
                     return false;
                 }
-                if (this.isUserBlacklisted(userId)) {
-                    await this.client.callApi('send_group_msg', {
-                        group_id: groupId,
-                        message: `[CQ:at,qq=${userId}] 你已被列入黑名单，无法使用搜索功能`
-                    });
-                    return true;
-                }
-
-                const query = content.substring(4).trim();
-                let reply = query 
-                    ? (await this.searchMcmod(query)).replace(/https?:\/\/\S+/g, '')
-                    : '请在mods后面输入要搜索的内容，例如"mods 工业"';
-
-                await this.client.callApi('send_group_msg', { group_id: groupId, message: reply });
-                return true;
-            }
-
-            // 原有AI对话处理
-            if (content.toLowerCase().startsWith('mod')) {
-                if (this.isGroupBlacklisted(groupId)) return false;
-                if (this.isUserBlacklisted(userId)) {
-                    await this.client.callApi('send_group_msg', {
-                        group_id: groupId,
-                        message: `[CQ:at,qq=${userId}] 你已被列入黑名单，无法使用AI功能`
-                    });
-                    return true;
-                }
-
-                const query = content.substring(3).trim();
+                
+                const isModsCommand = content.toLowerCase().startsWith('mods ');
+                const query = content.substring(isModsCommand ? 5 : 4).trim();
+                
                 if (!query) {
-                    await this.client.callApi('send_group_msg', {
-                        group_id: groupId,
-                        message: '请在mod后面输入要对话的内容'
+                    await this.client.callApi('send_group_msg', { 
+                        group_id: groupId, 
+                        message: '请在mod或mods后面输入要查询的内容' 
                     });
                     return true;
                 }
-                
-                // 调用DeepSeek API（传入用户ID以使用上下文）
-                const reply = await this.callDeepSeekAPI(query, userId);
-                
-                await this.client.callApi('send_group_msg', {
-                    group_id: groupId,
-                    message: reply
+
+                // 处理mods命令（直接搜索）
+                if (isModsCommand) {
+                    const searchHtml = await this.searchMcMod(query);
+                    if (!searchHtml) {
+                        await this.client.callApi('send_group_msg', { 
+                            group_id: groupId, 
+                            message: '搜索失败，请稍后再试' 
+                        });
+                        return true;
+                    }
+                    
+                    const result = this.extractMostRelevantResult(searchHtml);
+                    if (!result) {
+                        await this.client.callApi('send_group_msg', { 
+                            group_id: groupId, 
+                            message: '未找到相关信息' 
+                        });
+                        return true;
+                    }
+                    
+                    await this.client.callApi('send_group_msg', { 
+                        group_id: groupId, 
+                        message: `搜索结果:\n标题: ${result.title}\n简介: ${result.description}` 
+                    });
+                    return true;
+                }
+
+                // 处理mod命令（AI回答）
+                if (!this.contexts.has(groupId)) this.contexts.set(groupId, []);
+                const context = this.contexts.get(groupId);
+
+                context.push({ role: 'user', content: query });
+                if (context.length > this.maxContext) context.shift();
+
+                const referenceContent = await this.searchAndScrape(query);
+                const messages = [
+                    { role: 'system', content: this.systemPrompt },
+                    ...context.map(item => ({ role: item.role, content: item.content })),
+                    { role: 'user', content: `参考资料：${referenceContent || "无相关资料"}` }
+                ];
+
+                const reply = await this.callDeepSeekAPI(messages);
+                context.push({ role: 'assistant', content: reply });
+                if (context.length > this.maxContext) context.shift();
+
+                await this.client.callApi('send_group_msg', { 
+                    group_id: groupId, 
+                    message: reply.substring(0, 200) 
                 });
                 return true;
             }
@@ -591,54 +523,3 @@ class DeepSeekPlugin {
 
 module.exports = DeepSeekPlugin;
 
-// 仅在直接运行此文件时执行测试代码
-if (require.main === module) {
-    console.log('开始测试MC百科搜索功能...');
-    
-    const axios = require('axios');
-    const cheerio = require('cheerio');
-    
-    async function testSearch(query) {
-        try {
-            console.log(`开始搜索: ${query}`);
-            const response = await axios.get('https://www.mcmod.cn/s', {
-                params: { key: query },
-                headers: {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3'
-                }
-            });
-
-            console.log('接收到响应，状态码:', response.status);
-            
-            const $ = cheerio.load(response.data);
-            
-            // 打印页面结构信息以便分析
-            console.log('页面标题:', $('title').text());
-            console.log('搜索结果项数量:', $('body a[href^="https://www.mcmod.cn/class/"]').length);
-            
-            // 输出前5个链接以分析
-            let count = 0;
-            $('body a[href^="https://www.mcmod.cn/class/"]').each((i, el) => {
-                if (count < 5) {
-                    console.log(`结果 ${count+1}:`, {
-                        href: $(el).attr('href'),
-                        text: $(el).text().trim(),
-                        parentText: $(el).parent().text().trim().substring(0, 50) + '...'
-                    });
-                    count++;
-                }
-            });
-            
-            // 保存HTML到文件以便进一步分析
-            const fs = require('fs');
-            fs.writeFileSync('mcmod_search_result.html', response.data);
-            console.log('已将响应HTML保存到 mcmod_search_result.html');
-            
-        } catch (error) {
-            console.error('搜索失败:', error.message);
-        }
-    }
-    
-    // 执行测试搜索
-    testSearch('工业');
-}
